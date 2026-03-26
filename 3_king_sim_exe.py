@@ -10,9 +10,9 @@ from loguru import logger
 
 
 # =================================================================
-# [3-Kingdom] 專案代號：草船借箭 (Operation: STRAW BOATS v3.4)
-# 核心功能：48 小時極速動量偵察 + 精確淨利成本核算 + TG 通報
-# 目的：收集 5U-30U 淨利達成率與時效，為實盤參數提供數據支持
+# [3-Kingdom] 專案代號：草船借箭 (Operation: STRAW BOATS v3.4.1)
+# 核心功能：48 小時極速動量偵察 + 完美對齊做空/做多淨利核算 + TG 通報
+# 更新：優化做空目標價數學模型，確保 5U-30U 淨利絕對精準
 # =================================================================
 
 class StrawBoatsDataCollector:
@@ -44,10 +44,9 @@ class StrawBoatsDataCollector:
         self.max_exposure_sec = 600  # 單筆 10 分鐘上限
         self.best_signal_info = "Initializing..."
 
-        logger.info(f"🏹 Operation: STRAW BOATS v3.4 [48H 採集版] 啟動")
+        logger.info(f"🏹 Operation: STRAW BOATS v3.4.1 [精確核算版] 啟動")
         logger.info(f"🕒 預計結束時間: {self.end_time.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-        self.send_tg(
-            f"🚀 **[Straw Boats v3.4] 48H 採集啟動**\n目標：收集 {max_samples} 筆數據\n結束時間：{self.end_time.strftime('%H:%M')} UTC")
+        self.send_tg(f"🚀 **[Straw Boats v3.4.1] 採集重啟**\n精確核算模組已加載\n目標：{max_samples} 筆數據")
 
     def send_tg(self, message):
         """異步發送 TG 訊息"""
@@ -70,29 +69,37 @@ class StrawBoatsDataCollector:
                     spot_vols.append({'symbol': s, 'vol': float(data['quoteVolume'])})
             df = pd.DataFrame(spot_vols).sort_values(by='vol', ascending=False)
             self.top_20_pairs = df.head(20)['symbol'].tolist()
-            logger.success(f"🎯 獵場已更新，鎖定前 20 名精英幣種。")
+            logger.success(f"🎯 獵場更新成功，鎖定前 20 名精英幣種。")
         except Exception as e:
             logger.error(f"❌ 偵察失敗: {e}")
 
     def calculate_net_target_price(self, entry_p, target_net_u, side):
         """
         🚀 核心算法：精確計算扣除成本後的目標價
-        公式推導：Qty = (Capital * (1-TakerFee)) / EntryP
-                  (Qty * TargetP * (1-MakerFee)) - Capital = TargetNetU
+        對於 Long: (Qty * TargetP * (1-MakerFee)) - Capital = TargetNetU
+        對於 Short: (Capital * (1-TakerFee)) - (Qty * TargetP * (1+MakerFee)) = TargetNetU
         """
         capital = self.order_size_u
-        qty = (capital * (1 - self.fee_taker)) / entry_p
+        f_t = self.fee_taker
+        f_m = self.fee_maker
 
-        # TargetP = (TargetNetU + Capital) / (Qty * (1 - MakerFee))
         if side == 'LONG':
-            return (target_net_u + capital) / (qty * (1 - self.fee_maker))
+            # Qty 是買入後的實拿數量 (扣除 Taker Fee)
+            qty = (capital * (1 - f_t)) / entry_p
+            # TargetP = (TargetNetU + Capital) / (Qty * (1 - f_m))
+            return (target_net_u + capital) / (qty * (1 - f_m))
         else:
-            # 做空邏輯反轉：(Capital - Qty * CoverP * (1+MakerFee)) = TargetNetU
-            # 這裡簡化為等效價差計算
-            return entry_p * (1 - (target_net_u + (capital * (self.fee_taker + self.fee_maker))) / capital)
+            # Short 入場賣出獲得的資金 (已扣 Taker Fee)
+            received_u = capital * (1 - f_t)
+            # 賣出時拿到的幣數 Qty = received_u / entry_p
+            qty = received_u / entry_p
+            # 平倉買回成本 Cost = Qty * TargetP * (1 + f_m)
+            # Profit = received_u - Cost = TargetNetU
+            # TargetP = (received_u - TargetNetU) / (Qty * (1 + f_m))
+            return (received_u - target_net_u) / (qty * (1 + f_m))
 
     def get_signal(self, symbol):
-        """1m 動量偵測"""
+        """1m 極速動量偵測"""
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe='1m', limit=30)
             df = pd.DataFrame(ohlcv, columns=['t', 'o', 'h', 'l', 'c', 'v'])
@@ -104,6 +111,7 @@ class StrawBoatsDataCollector:
             df['rsi'] = 100 - (100 / (1 + rs))
 
             c, ema, rsi = df['close'].iloc[-1], df['ema'].iloc[-1], df['rsi'].iloc[-1]
+            # 方向判定
             if rsi > 55 and c > ema: return 'LONG', c, rsi
             if rsi < 45 and c < ema: return 'SHORT', c, rsi
             return None, c, rsi
@@ -111,7 +119,7 @@ class StrawBoatsDataCollector:
             return None, None, None
 
     def update_fleet(self):
-        """追蹤時效"""
+        """即時追蹤時效回報"""
         if not self.active_trades: return
         try:
             all_tk = self.exchange.fetch_tickers(params={'category': 'spot'})
@@ -119,18 +127,21 @@ class StrawBoatsDataCollector:
                 symbol = trade['symbol']
                 if symbol not in all_tk: continue
 
+                # 觀察成交價 (LONG 要賣看 Bid, SHORT 要買回看 Ask)
                 curr_p = all_tk[symbol]['bid'] if trade['side'] == 'LONG' else all_tk[symbol]['ask']
                 elapsed = time.time() - trade['entry_time']
 
                 all_hit = True
                 for t_val, t_price in trade['targets'].items():
                     if trade['achieved'][t_val] is None:
+                        # LONG 需價升，SHORT 需價跌
                         is_hit = (curr_p >= t_price) if trade['side'] == 'LONG' else (curr_p <= t_price)
                         if is_hit:
                             trade['achieved'][t_val] = round(elapsed, 2)
-                            # 只有在達成 5U 和 15U 時才發 TG，避免洗版
+                            # 只有達成 5U 和 15U 時通報 TG
                             if t_val in [5.0, 15.0]:
-                                self.send_tg(f"✨ `{symbol}` 達成利潤階梯 `+{t_val}U`！\n耗時: `{elapsed:.1f}s`")
+                                self.send_tg(
+                                    f"💰 `{symbol}({trade['side']})` 達成淨利 `+{t_val}U`！\n耗時: `{elapsed:.1f}s`")
                         else:
                             all_hit = False
 
@@ -139,11 +150,11 @@ class StrawBoatsDataCollector:
                     self.active_trades.remove(trade)
                     self.samples_collected += 1
         except Exception as e:
-            logger.error(f"❌ 數據追蹤更新失敗: {e}")
+            logger.error(f"❌ 追蹤更新失敗: {e}")
 
     def save_csv(self, trade, timeout):
         data = {
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'timestamp': datetime.now().strftime('%H:%M:%S'),
             'symbol': trade['symbol'], 'side': trade['side'], 'entry': trade['entry_p'],
             'net_5u': trade['achieved'][5.0], 'net_10u': trade['achieved'][10.0],
             'net_15u': trade['achieved'][15.0], 'net_20u': trade['achieved'][20.0],
@@ -169,14 +180,14 @@ class StrawBoatsDataCollector:
                         'entry_p': entry_p, 'targets': target_map,
                         'achieved': {t: None for t in net_targets}
                     })
-                    logger.success(f"🔥 {side} 觸發: {symbol} (RSI: {rsi:.1f})")
+                    logger.success(f"🔥 {side} 觸發: {symbol} (RSI: {rsi:.1f}) | 目標已精確對齊淨利")
 
             self.update_fleet()
 
             # 控制台心跳
             time_left = self.end_time - datetime.now(timezone.utc)
             print(
-                f"\r📡 [搜獵中] 剩餘時間: {str(time_left).split('.')[0]} | 已收割樣本: {self.samples_collected}/{self.max_samples} | 監控中: {len(self.active_trades)} 艘",
+                f"\r📡 [採集中] 剩: {str(time_left).split('.')[0]} | 已收割: {self.samples_collected}/{self.max_samples} | 監控中: {len(self.active_trades)}",
                 end="")
 
             if it % 1000 == 0: self.fetch_top_20()
@@ -188,6 +199,5 @@ class StrawBoatsDataCollector:
 
 
 if __name__ == "__main__":
-    # 執行 48 小時，或收集滿 5,000 個樣本
     collector = StrawBoatsDataCollector(max_hours=48, max_samples=5000)
     collector.run()
