@@ -1,0 +1,61 @@
+[3-Kingdom] Stat-Arb v3.0 Project Ignore List
+
+1. Trading Data & Sensitive Information (CRITICAL)
+
+Ignore API keys and private connection configs
+
+config/config.yaml
+.env
+
+Ignore all generated trade data, signals and logs
+
+data/
+result/
+*.csv
+*.parquet
+*.json
+
+2. Python Environment & Cache
+
+Ignore compiled python files
+
+pycache/
+*.py[cod]
+*$py.class
+*.so
+
+Ignore local virtual environments
+
+venv/
+.venv/
+env/
+build/
+dist/
+*.egg-info/
+
+3. IDE & System Metadata
+
+JetBrains (PyCharm)
+
+.idea/
+
+VS Code
+
+.vscode/
+.history/
+
+Operating System Files
+
+.DS_Store
+Thumbs.db
+*.log
+
+4. Specific Exclusions (Optional)
+
+If you want to keep the folder structure but ignore content,
+
+uncomment below:
+
+!data/.gitkeep
+
+!result/.gitkeep
