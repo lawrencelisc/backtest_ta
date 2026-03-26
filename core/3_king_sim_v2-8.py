@@ -9,8 +9,8 @@ from loguru import logger
 
 
 # =================================================================
-# [3-Kingdom] 專案代號：三國演義 - 實戰模擬探測器 (v1.8 擴張與策略對比版)
-# 更新：1. 擴大掃描至 Top 50 2. 計算 Maker 策略潛在收益 3. 縮減演技損耗
+# [3-Kingdom] 專案代號：三國演義 - 實戰模擬探測器 (v1.9 穩定雷達版)
+# 更新：1. 強制指定現貨類別 (Spot) 2. 增加路徑探測寬度 3. 修復 -999% 顯示錯誤
 # =================================================================
 
 class ThreeKingdomsSim:
@@ -24,51 +24,76 @@ class ThreeKingdomsSim:
         self.virtual_wallet = {'Yamato': initial_capital / 3, 'Dreadnought': initial_capital / 3,
                                'Yukikaze': initial_capital / 3}
 
-        # 🧪 戰術調整
-        self.fee_taker = 0.0006  # 0.06%
-        self.fee_maker = 0.0002  # 模擬 Maker 費率 (0.02%)
-        self.jitter_range = (0.0002, 0.0008)  # 縮減演技損耗至 0.02% - 0.08%
+        # 🧪 戰術參數
+        self.fee_taker = 0.0006
+        self.fee_maker = 0.0002
+        self.jitter_range = (0.0002, 0.0008)
 
         self.paths = []
         self.all_time_best_roi = -999.0
 
-        logger.info(f"🚀 3-Kingdom v1.8 [戰術擴張] 啟動 | 演技修正: {self.jitter_range}")
+        logger.info(f"🚀 3-Kingdom v1.9 [穩定雷達] 啟動 | 演技修正: {self.jitter_range}")
 
-    def build_matrix(self, top_n=50):  # 擴張至 Top 50
+    def build_matrix(self, top_n=50):
+        """構建三角矩陣 (優化 Spot 類別抓取)"""
         logger.info(f"🔍 正在搜尋全市場成交量前 {top_n} 名的獵物...")
         try:
-            tickers = self.exchange.fetch_tickers()
+            # 1. 強制指定類別為 spot，確保抓到現貨數據
+            tickers = self.exchange.fetch_tickers(params={'category': 'spot'})
             spot_volumes = []
             for symbol, data in tickers.items():
+                # 排除槓桿代幣與穩定幣對
                 if '/USDT' in symbol and 'quoteVolume' in data:
                     base = symbol.split('/')[0]
-                    if base in ['USDC', 'DAI', 'FDUSD', 'BUSD', 'RLUSD']: continue
+                    if base in ['USDC', 'DAI', 'FDUSD', 'BUSD', 'RLUSD'] or 'DOWN' in base or 'UP' in base:
+                        continue
                     spot_volumes.append({'symbol': symbol, 'volume': float(data['quoteVolume'])})
 
-            top_base_symbols = pd.DataFrame(spot_volumes).sort_values(by='volume', ascending=False).head(top_n)[
-                'symbol'].str.replace('/USDT', '').tolist()
+            if not spot_volumes:
+                logger.error("❌ 無法獲取現貨成交量數據，請檢查網絡或 API 權限")
+                return
 
+            df_vol = pd.DataFrame(spot_volumes).sort_values(by='volume', ascending=False)
+            top_base_symbols = df_vol.head(top_n)['symbol'].str.replace('/USDT', '').tolist()
+
+            logger.info(f"🎯 已識別前 10 名活躍幣種: {', '.join(top_base_symbols[:10])}")
+
+            # 2. 構建路徑節點
             markets = self.exchange.load_markets()
             nodes = {}
             for s, m in markets.items():
                 if m.get('spot') and m.get('active'):
                     base, quote = m['base'], m['quote']
+                    # 只要涉及 USDT、BTC、ETH 或 Top N 幣種的都納入節點
                     if quote in ['USDT', 'BTC', 'ETH'] or base in top_base_symbols:
                         if base not in nodes: nodes[base] = {}
                         nodes[base][quote] = ('SELL', s)
                         if quote not in nodes: nodes[quote] = {}
                         nodes[quote][base] = ('BUY', s)
 
+            # 3. 搜尋路徑環路
             self.paths = []
             start = 'USDT'
             for a in nodes.get(start, {}):
                 for b in nodes.get(a, {}):
                     if b in nodes and start in nodes[b]:
                         if a != b and a != start and b != start:
+                            # 強化路徑：只要包含任何活躍幣種就納入
                             if a in top_base_symbols or b in top_base_symbols:
                                 self.paths.append(
                                     [(start, a, nodes[start][a]), (a, b, nodes[a][b]), (b, start, nodes[b][start])])
-            logger.success(f"✅ 矩陣重構完成，已鎖定 {len(self.paths)} 條路徑 (含 Top 50 幣種)。")
+
+            if not self.paths:
+                logger.warning("⚠️ 獵場目前太過冷清，嘗試放寬門檻搜尋全場路徑...")
+                # 若找不到活躍路徑，則不限制活躍幣種，抓取全場路徑作為備案
+                for a in nodes.get(start, {}):
+                    for b in nodes.get(a, {}):
+                        if b in nodes and start in nodes[b]:
+                            if a != b and a != start and b != start:
+                                self.paths.append(
+                                    [(start, a, nodes[start][a]), (a, b, nodes[a][b]), (b, start, nodes[b][start])])
+
+            logger.success(f"✅ 矩陣重構完成，已鎖定 {len(self.paths)} 條搜尋路徑。")
         except Exception as e:
             logger.error(f"❌ 矩陣構建失敗: {e}")
 
@@ -92,12 +117,7 @@ class ThreeKingdomsSim:
     def simulate_strike(self, path, account_name):
         current_u = self.virtual_wallet[account_name] / 4
         jitter = random.uniform(*self.jitter_range)
-
-        # 1. 計算純 Taker ROI (現有邏輯)
-        temp_taker = current_u
-        # 2. 計算 Leg 1 Maker ROI (優化邏輯)
-        temp_maker = current_u
-
+        temp_taker, temp_maker = current_u, current_u
         prices, steps = [], []
 
         for i, step in enumerate(path):
@@ -109,14 +129,14 @@ class ThreeKingdomsSim:
             prices.append(eff_p)
             steps.append(f"{symbol}({side})")
 
-            # Taker 計算
+            # Taker 費率
             fee_t = self.fee_taker
             if side == 'BUY':
                 temp_taker = (temp_taker / eff_p) * (1 - fee_t)
             else:
                 temp_taker = (temp_taker * eff_p) * (1 - fee_t)
 
-            # Maker 計算 (僅針對第一腿 i==0)
+            # 第一腿 Maker 費率
             fee_m = self.fee_maker if i == 0 else self.fee_taker
             if side == 'BUY':
                 temp_maker = (temp_maker / eff_p) * (1 - fee_m)
@@ -137,9 +157,15 @@ class ThreeKingdomsSim:
         while True:
             it += 1
             now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            sample = random.sample(self.paths, min(15, len(self.paths)))
 
-            best_t, best_m = -999.0, -999.0
+            if not self.paths:
+                logger.warning("❌ 無可用路徑，正在重新初始化雷達...")
+                self.build_matrix(top_n=50)
+                time.sleep(5)
+                continue
+
+            sample = random.sample(self.paths, min(15, len(self.paths)))
+            best_t, best_m = -99.0, -99.0  # 修復初始值顯示
 
             for path in sample:
                 acc = random.choice(['Yamato', 'Dreadnought', 'Yukikaze'])
@@ -148,7 +174,7 @@ class ThreeKingdomsSim:
                 if roi_t > best_t: best_t = roi_t
                 if roi_m > best_m: best_m = roi_m
 
-                if roi_m > -0.15:  # 只要 Maker 策略接近回本就紀錄
+                if roi_m > -0.15:
                     self.save_log({
                         'timestamp': now, 'it': it, 'path': path_s, 'roi_taker': round(roi_t, 4),
                         'roi_maker': round(roi_m, 4), 'jitter': round(jitter, 6),
@@ -159,16 +185,17 @@ class ThreeKingdomsSim:
                     self.virtual_wallet[acc] += (roi_t / 100) * (self.virtual_wallet[acc] / 4)
                     logger.success(f"🔥 成交! {path_s} | ROI: {roi_t:.4f}%")
 
-            if best_t > self.all_time_best_roi:
+            # 只有當真的有掃描到路徑時才更新紀錄
+            if best_t > -90 and best_t > self.all_time_best_roi:
                 self.all_time_best_roi = best_t
                 logger.info(f"🏆 新紀錄 (Taker): {best_t:+.4f}% | (若首腿 Maker): {best_m:+.4f}%")
 
             if it % 10 == 0:
                 logger.info(
-                    f"📊 [輪次 {it}] Taker最高: {self.all_time_best_roi:+.4f}% | 資產: {sum(self.virtual_wallet.values()):.2f}U")
+                    f"📊 [輪次 {it}] Taker最高: {self.all_time_best_roi if self.all_time_best_roi > -90 else 0:+.4f}% | 資產: {sum(self.virtual_wallet.values()):.2f}U")
                 if it % 300 == 0: self.build_matrix(top_n=50)
             else:
-                print(f"📡 搜獵中 (Top 50)... 輪次: {it} | Taker最高: {self.all_time_best_roi:+.4f}%", end='\r')
+                print(f"📡 搜獵中... 輪次: {it} | 掃描路徑: {len(self.paths)}", end='\r')
             time.sleep(1.2)
 
 
