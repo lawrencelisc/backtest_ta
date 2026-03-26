@@ -4,7 +4,7 @@ Description=algo_stat_arb_v1
 [Service]
 Type=simple
 WorkingDirectory=/usr/local/app/backtest_ta
-ExecStart=/usr/local/app/backtest_ta/venv/bin/python3.12 3_king_sim_v2-6.py
+ExecStart=/usr/local/app/backtest_ta/venv/bin/python3.12 3_king_sim_exe.py
 StandardOutput=syslog
 Restart=always
 RestartSec=2
