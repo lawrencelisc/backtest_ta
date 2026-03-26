@@ -1,6 +1,6 @@
 [3-Kingdom] Stat-Arb v3.0 Project Ignore List
 
-1. Trading Data & Sensitive Information (CRITICAL)
+Trading Data & Sensitive Information (CRITICAL)
 
 Ignore API keys and private connection configs
 
