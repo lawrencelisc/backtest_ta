@@ -46,7 +46,7 @@
 #### Dev Environment
 1. Run the application
     ```shell script
-    python3.12 straw_boats_3-9-7.py
+    python3.12 3_king_sim_exe.py
     ```
 
 #### Running via Systemd

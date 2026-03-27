@@ -7,10 +7,6 @@ from loguru import logger
 from datetime import datetime
 import os
 
-
-if os.name != 'nt': # 如果唔係 Windows (即係 Mac 或 Linux)
-    os.environ['TERM'] = 'xterm-256color'
-
 # ==========================================
 # 1. 全局配置與安全鎖
 # ==========================================
