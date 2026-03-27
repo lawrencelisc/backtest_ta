@@ -60,7 +60,15 @@ class MasterOrchestrator:
         self.top_20 = []
         self.active_symbols = set()
         self.tsunami_pause_until = 0
-        self.blacklist = ['USDC/USDT', 'BUSD/USDT', 'DAI/USDT', 'FDUSD/USDT', 'WBTC/USDT']
+        self.blacklist = [
+            # 傳統穩定幣
+             # 新興與合成穩定幣 (Ethena 系列)
+            'USDE/USDT', 'sUSDE/USDT', 'DEUSD/USDT', 'EUSD/USDT',
+            # 算算法與掛鉤幣
+            'FRAX/USDT', 'LUSD/USDT', 'USTC/USDT', 'USD0/USDT', 'PYUSD/USDT',
+            # 包裝資產 (通常波幅與原資產同步，但易有流動性陷阱)
+            'WBTC/USDT', 'stETH/USDT', 'cbETH/USDT', 'WETH/USDT'
+        ]
         self.scan_count = 0  # 紀錄掃描次數
 
     def calculate_atr(self, symbol):
@@ -102,6 +110,12 @@ class MasterOrchestrator:
             curr_p = ticker['last']
             atr = self.calculate_atr(symbol)
             if not atr: return
+
+            # 🛡️ 核心：波動率過濾 (防止誤入穩定幣)
+            # 如果 ATR 佔價格比例低於 0.05%，極大機會是穩定幣
+            if (atr / curr_p) < 0.0005:
+                # logger.debug(f"⚠️ {symbol} 波動率太低 ({atr/curr_p:.5f})，疑似穩定幣，跳過。")
+                return
 
             # 策略：均值回歸 (過往1分鐘收盤 vs 現在)
             ohlcv_1m = exchange.fetch_ohlcv(symbol, '1m', limit=2)
